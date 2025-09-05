@@ -299,10 +299,10 @@ class PowerNetEnv(gym.Env):
 
             if self.algorithm == "Laurent":
                 # This is where bugs comes from, if we don't use copy, this slice is actually creating a view of originally data.
-                active_power = cp.copy(one_slot_data[0:34])
-                renewable_active_power = one_slot_data[34:68]
-                self.active_power = (active_power - renewable_active_power)[1:34]
-                reactive_power = np.zeros(33)
+                active_power = cp.copy(one_slot_data[0:25])
+                renewable_active_power = one_slot_data[25:50]
+                self.active_power = (active_power - renewable_active_power)[1:25]
+                reactive_power = np.zeros(24)
                 price = one_slot_data[-1]
                 self.solution = self.net.run_pf(active_power=self.active_power)
 
