@@ -290,73 +290,86 @@ class PowerNetEnv(gym.Env):
     def _get_obs(self):
         """
         Executes the power flow based on the chosen algorithm and returns the observations.
-
-        Returns:
-            dict: The observation dictionary containing various state elements.
+        This function is generalized to work with any number of nodes defined in the environment.
         """
         if self.state_pattern == 'default':
             one_slot_data = self.data_manager.select_timeslot_data(self.year, self.month, self.day, self.current_time)
 
             if self.algorithm == "Laurent":
-                # This is where bugs comes from, if we don't use copy, this slice is actually creating a view of originally data.
-                active_power = cp.copy(one_slot_data[0:25])
-                renewable_active_power = one_slot_data[25:50]
-                self.active_power = (active_power - renewable_active_power)[1:25]
-                reactive_power = np.zeros(24)
+                # --- START: Generalized Code ---
+                # Dynamically get data for all nodes based on self.node_num
+                active_power = cp.copy(one_slot_data[0:self.node_num])
+                renewable_active_power = cp.copy(one_slot_data[self.node_num : 2 * self.node_num])
+
+                # Calculate net power for all non-slack buses (from bus 1 to node_num-1)
+                net_power = (active_power - renewable_active_power)[1:self.node_num]
+                
+                # Reshape from a 1D array to a 2D array (e.g., from (24,) to (1, 24))
+                # This is crucial for the power flow solver's input format.
+                self.active_power = net_power.reshape(1, -1)
+
+                # Create reactive power array with a matching 2D shape
+                reactive_power = np.zeros((1, self.node_num - 1))
+                # --- END: Generalized Code ---
+                
                 price = one_slot_data[-1]
-                self.solution = self.net.run_pf(active_power=self.active_power)
+                self.solution = self.net.run_pf(active_power=self.active_power, reactive_power=reactive_power)
 
                 obs = {'node_data': {'voltage': {}, 'active_power': {}, 'reactive_power': {},
                                      'renewable_active_power': {}},
                        'battery_data': {'soc': {}}, 'price': {}, 'aux': {}}
 
-                for node_index in range(len(self.net.bus_info.NODES)):  # NODES[1-34], node_index[0-33]
-                    if node_index == 0:
+                for node_index in range(self.node_num):
+                    if node_index == 0: # Slack bus
                         obs['node_data']['voltage'][f'node_{node_index}'] = 1.0
                         obs['node_data']['active_power'][f'node_{node_index}'] = 0.0
                         obs['node_data']['renewable_active_power'][f'node_{node_index}'] = 0.0
                     else:
                         obs['node_data']['voltage'][f'node_{node_index}'] = abs(
                             self.solution['v'].T[node_index - 1]).squeeze()
-                        obs['node_data']['active_power'][f'node_{node_index}'] = active_power[node_index - 1]
-                        obs['node_data']['renewable_active_power'][f'node_{node_index}'] = renewable_active_power[
-                            node_index - 1]
+                        obs['node_data']['active_power'][f'node_{node_index}'] = active_power[node_index]
+                        obs['node_data']['renewable_active_power'][f'node_{node_index}'] = renewable_active_power[node_index]
+                
                 for node_index in self.battery_list:
                     obs['battery_data']['soc'][f'battery_{node_index}'] = getattr(self, f'battery_{node_index}').SOC()
                 obs['price'] = price
-            else:
-                active_power = one_slot_data[0:25]
-                active_power[0] = 0
-                renewable_active_power = one_slot_data[25:50]
-                renewable_active_power[0] = 0
+            
+            else: # PandaPower section
+                # --- START: Generalized Code ---
+                active_power = one_slot_data[0:self.node_num]
+                renewable_active_power = one_slot_data[self.node_num : 2 * self.node_num]
                 price = one_slot_data[-1]
+                # --- END: Generalized Code ---
+                
                 for bus_index in self.net.load.bus.index:
-                    self.net.load.p_mw[bus_index] = (active_power[bus_index] - renewable_active_power[
-                        bus_index]) / self.s_base
-                    self.net.load.q_mvar[bus_index] = 0
+                    # Assuming load table indices map to bus numbers starting from 1
+                    # e.g., load index 0 corresponds to bus 1 (index 1 in active_power array)
+                    bus_number = self.net.load.bus[bus_index]
+                    if bus_number < len(active_power):
+                         self.net.load.p_mw[bus_index] = (active_power[bus_number] - renewable_active_power[bus_number]) / self.s_base
+                         self.net.load.q_mvar[bus_index] = 0
+                
                 pp.runpp(self.net, algorithm='nr')
-                v_real = self.net.res_bus["vm_pu"].values * np.cos(np.deg2rad(self.net.res_bus["va_degree"].values))
-                v_img = self.net.res_bus["vm_pu"].values * np.sin(np.deg2rad(self.net.res_bus["va_degree"].values))
-                v_result = v_real + 1j * v_img
-
+                
                 obs = {'node_data': {'voltage': {}, 'active_power': {}, 'reactive_power': {},
                                      'renewable_active_power': {}},
                        'battery_data': {'soc': {}}, 'price': {}, 'aux': {}}
 
-                for node_index in self.net.load.bus.index:
-                    bus_idx = self.net.load.at[node_index, 'bus']
-                    obs['node_data']['voltage'][f'node_{node_index}'] = self.net.res_bus.vm_pu.at[bus_idx]
-                    obs['node_data']['active_power'][f'node_{node_index}'] = active_power[node_index]
-                    obs['node_data']['reactive_power'][f'node_{node_index}'] = self.net.res_load.q_mvar[node_index]
-                    obs['node_data']['renewable_active_power'][f'node_{node_index}'] = renewable_active_power[
-                        node_index]
+                for node_index in range(self.node_num):
+                    bus_idx_query = self.net.bus[self.net.bus.name == node_index]
+                    if not bus_idx_query.empty:
+                        bus_idx = bus_idx_query.index[0]
+                        obs['node_data']['voltage'][f'node_{node_index}'] = self.net.res_bus.vm_pu.at[bus_idx]
+                        obs['node_data']['active_power'][f'node_{node_index}'] = active_power[node_index]
+                        obs['node_data']['renewable_active_power'][f'node_{node_index}'] = renewable_active_power[node_index]
+
                 for node_index in self.battery_list:
                     obs['battery_data']['soc'][f'battery_{node_index}'] = getattr(self, f'battery_{node_index}').SOC()
                 obs['price'] = price
         else:
             raise ValueError('please redesign the get obs function to fit the pattern you want')
         return obs
-
+    
     def _apply_battery_actions(self, action):
         '''apply action to battery charge/discharge, update the battery condition, excute power flow, update the network condition'''
         if self.state_pattern == 'default':
