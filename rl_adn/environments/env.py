@@ -325,9 +325,9 @@ class PowerNetEnv(gym.Env):
                     obs['battery_data']['soc'][f'battery_{node_index}'] = getattr(self, f'battery_{node_index}').SOC()
                 obs['price'] = price
             else:
-                active_power = one_slot_data[0:34]
+                active_power = one_slot_data[0:25]
                 active_power[0] = 0
-                renewable_active_power = one_slot_data[34:68]
+                renewable_active_power = one_slot_data[25:50]
                 renewable_active_power[0] = 0
                 price = one_slot_data[-1]
                 for bus_index in self.net.load.bus.index:
